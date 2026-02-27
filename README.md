@@ -10,8 +10,9 @@ Snowflake の **SEARCH() 関数**、**Search Optimization Service**、**Cortex S
 
 1. [構築手順](#1-構築手順)
 2. [アーキテクチャ・コードロジック](#2-アーキテクチャコードロジック)
-3. [取扱説明書](#3-取扱説明書)
-4. [注意点](#4-注意点)
+3. [RAG（検索拡張生成）のロジック詳解](#3-rag検索拡張生成のロジック詳解)
+4. [取扱説明書](#4-取扱説明書)
+5. [注意点](#5-注意点)
 
 ---
 
@@ -156,38 +157,46 @@ Cortex Search Service の増分更新に必要です。
 ALTER TABLE LOG_SEARCH_APP.PUBLIC.LOGS SET CHANGE_TRACKING = TRUE;
 ```
 
-### 1.7 Cortex Search Service 作成
+### 1.7 セマンティック検索用テーブル作成（LOGS_SMALL）
 
-セマンティック検索用の Cortex Search Service を作成します。
-`LOG_ID` は NUMBER 型のため、VARCHAR にキャストして PRIMARY KEY に指定します。
+Cortex Search Service のベクトル化は大量データで失敗する場合があるため、セマンティック検索用には別テーブル（10万件）を作成します。
+キーワード検索は引き続き LOGS テーブル（1,000万件）を使用します。
 
 ```sql
--- Warehouse を一時的に拡大（ベクトル化を高速化）
-ALTER WAREHOUSE SEARCH_WH SET WAREHOUSE_SIZE = 'X4LARGE';
+-- セマンティック検索用テーブル（10万件）
+CREATE OR REPLACE TABLE LOG_SEARCH_APP.PUBLIC.LOGS_SMALL AS
+SELECT * FROM LOG_SEARCH_APP.PUBLIC.LOGS LIMIT 100000;
 
--- Cortex Search Service 作成
+-- CHANGE_TRACKING 有効化
+ALTER TABLE LOG_SEARCH_APP.PUBLIC.LOGS_SMALL SET CHANGE_TRACKING = TRUE;
+```
+
+### 1.8 Cortex Search Service 作成
+
+セマンティック検索用の Cortex Search Service を `LOGS_SMALL` テーブルから作成します。
+
+```sql
 CREATE OR REPLACE CORTEX SEARCH SERVICE LOG_SEARCH_APP.PUBLIC.LOG_SEMANTIC_SEARCH
     ON MESSAGE
-    PRIMARY KEY (LOG_ID)
     ATTRIBUTES SEVERITY, SOURCE, HOST
     WAREHOUSE = SEARCH_WH
     TARGET_LAG = '7 days'
     EMBEDDING_MODEL = 'snowflake-arctic-embed-l-v2.0'
     AS (
         SELECT LOG_ID::VARCHAR AS LOG_ID, TIMESTAMP, SEVERITY, SOURCE, HOST, MESSAGE
-        FROM LOG_SEARCH_APP.PUBLIC.LOGS
+        FROM LOG_SEARCH_APP.PUBLIC.LOGS_SMALL
     );
 
 -- ベクトル化の進捗確認（serving_state が ACTIVE になるまで待つ）
-SHOW CORTEX SEARCH SERVICES IN SCHEMA LOG_SEARCH_APP.PUBLIC;
-
--- ベクトル化完了後、Warehouse を縮小
-ALTER WAREHOUSE SEARCH_WH SET WAREHOUSE_SIZE = 'XSMALL';
+DESCRIBE CORTEX SEARCH SERVICE LOG_SEARCH_APP.PUBLIC.LOG_SEMANTIC_SEARCH;
 ```
 
-> **注意**: 1,000万件のベクトル化には数十分〜数時間かかる場合があります。`serving_state` が `ACTIVE`、`source_data_num_rows` が `10,000,000` になれば完了です。
+> **注意**:
+> - 10万件であれば数分で完了します。`serving_state` が `ACTIVE` になれば完了です。
+> - 1,000万件の LOGS テーブルを直接指定するとベクトル化が失敗する場合があります（"Dynamic Table refresh job cancelled." エラー）。その場合は行数を減らした LOGS_SMALL を使用してください。
+> - `LOG_ID` は NUMBER 型のため、`LOG_ID::VARCHAR AS LOG_ID` でキャストが必要です。
 
-### 1.8 Streamlit in Snowflake アプリのデプロイ
+### 1.9 Streamlit in Snowflake アプリのデプロイ
 
 ```sql
 -- ステージ作成
@@ -247,6 +256,7 @@ graph TB
 
     subgraph "Data"
         LOGS["LOGS テーブル<br/>(1,000万件)"]
+        LOGS_S["LOGS_SMALL テーブル<br/>(10万件)"]
         VEC["ベクトルインデックス<br/>(snowflake-arctic-embed-l-v2.0)"]
     end
 
@@ -257,7 +267,7 @@ graph TB
 
     SS -->|"Cortex Search SDK"| CSS
     CSS --> VEC
-    VEC -->|"エンベディング"| LOGS
+    VEC -->|"エンベディング"| LOGS_S
     SS -->|"RAG: AI分析"| CC
 ```
 
@@ -290,12 +300,14 @@ flowchart TD
     C --> E["Source フィルタ<br/>(@eq JSON)"]
     D & E --> F["Cortex Search SDK<br/>svc.search()"]
     F --> G["ベクトル類似度で<br/>関連ログを取得"]
-    G --> H[結果カード表示<br/>Severity バッジ付き]
-    H --> I{"「AI分析」ボタン押下?"}
-    I -->|Yes| J[検索結果をコンテキストに整形]
-    J --> K["Cortex Complete<br/>(claude-3-5-sonnet)"]
-    K --> L[AI分析結果を表示<br/>概要・原因・影響・推奨アクション]
-    I -->|No| M[終了]
+    G --> H["結果を session_state に保存"]
+    H --> I["テーブル形式で結果表示<br/>(st.dataframe)"]
+    I --> J{"「AI分析」ボタン押下?"}
+    J -->|Yes| K["session_state から<br/>結果を読み込み"]
+    K --> L[検索結果をコンテキストに整形]
+    L --> M["Cortex Complete<br/>(claude-3-5-sonnet)"]
+    M --> N[AI分析結果を表示<br/>概要・原因・影響・推奨アクション]
+    J -->|No| O[終了]
 ```
 
 ### 2.4 サイドバー機能
@@ -349,9 +361,132 @@ snowflake-log-search-app/
 
 ---
 
-## 3. 取扱説明書
+## 3. RAG（検索拡張生成）のロジック詳解
 
-### 3.1 Keyword Search（キーワード検索）
+本アプリの Semantic Search ページには **RAG（Retrieval-Augmented Generation）** 機能が実装されています。
+セマンティック検索で取得したログを LLM に渡し、自動分析を行う仕組みです。
+
+### 3.1 RAG の全体フロー
+
+```
+ユーザーの自然言語クエリ
+        │
+        ▼
+┌──────────────────────────────┐
+│ Step 1: Retrieval（検索）      │
+│  Cortex Search Service        │
+│  snowflake-arctic-embed-l-v2.0│
+│  → 意味的に類似したログを取得  │
+└───────────┬──────────────────┘
+            │ 関連ログ（最大1000件）
+            ▼
+┌──────────────────────────────┐
+│ Step 2: コンテキスト構築       │
+│  各ログを1行テキストに整形     │
+│  [SEVERITY] TIMESTAMP         │
+│  | SOURCE | HOST | MESSAGE    │
+└───────────┬──────────────────┘
+            │
+            ▼
+┌──────────────────────────────┐
+│ Step 3: Generation（生成）     │
+│  Cortex Complete              │
+│  claude-3-5-sonnet            │
+│  プロンプト + ログデータ       │
+└───────────┬──────────────────┘
+            │
+            ▼
+      AI分析結果を表示
+```
+
+### 3.2 各ステップの詳細
+
+#### Step 1 — Retrieval（検索）
+
+Cortex Search Service がユーザーのクエリをベクトル化し、`LOGS_SMALL` テーブルの MESSAGE カラムの embedding と意味的に近いログを取得します。
+
+- **埋め込みモデル**: `snowflake-arctic-embed-l-v2.0`（多言語対応・日本語対応）
+- **検索対象**: MESSAGE カラム
+- **フィルタ**: SEVERITY, SOURCE, HOST で絞り込み可能（JSON 形式の `@eq` / `@or` / `@and` フィルタ）
+- **最大取得件数**: 1,000件
+
+```python
+# Cortex Search SDK による検索
+svc = root.databases[DB].schemas[SCHEMA].cortex_search_services[SERVICE]
+resp = svc.search(
+    query="メモリ不足でサービスが停止した",
+    columns=["LOG_ID", "TIMESTAMP", "SEVERITY", "SOURCE", "HOST", "MESSAGE"],
+    limit=max_results,
+    filter={"@eq": {"SEVERITY": "ERROR"}}  # オプション
+)
+results = resp.results  # 類似度順のログリスト
+```
+
+#### Step 2 — コンテキスト構築
+
+検索結果の各ログを `[SEVERITY] TIMESTAMP | SOURCE | HOST | MESSAGE` の1行テキストに整形し、全行を結合します。
+
+```python
+log_lines = []
+for r in results:
+    data = dict(r)
+    log_lines.append(
+        f"[{data['SEVERITY']}] {data['TIMESTAMP'][:19]} | {data['SOURCE']} | {data['HOST']} | {data['MESSAGE']}"
+    )
+context = "\n".join(log_lines)
+```
+
+#### Step 3 — Generation（生成）
+
+整形したログデータ＋分析指示のプロンプトを Cortex Complete に送信します。
+
+- **LLM モデル**: `claude-3-5-sonnet`（Cortex Complete 経由）
+- **プロンプトで指示する分析観点**:
+  1. **概要** — ログ全体の傾向を簡潔にまとめる
+  2. **根本原因の推定** — 問題の原因を分析
+  3. **影響範囲** — ホスト・サービス・重要度の分布を整理
+  4. **推奨アクション** — 具体的な対応策を提案
+  5. **注意点** — 追加調査が必要な項目を指摘
+
+```python
+result_df = session.sql(
+    "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', ?) AS RESPONSE",
+    params=[prompt],
+).to_pandas()
+ai_response = result_df["RESPONSE"].iloc[0]
+```
+
+### 3.3 session_state による検索結果の保持
+
+Streamlit ではボタンを押すとページ全体が再実行されます。「AI分析」ボタンを押した際に「検索」ボタンの状態は `False` に戻るため、検索結果が消えてしまいます。
+
+この問題を解決するため、検索結果を `st.session_state` に保存しています:
+
+```python
+# 検索実行時に保存
+st.session_state["sem_results"] = resp.results
+st.session_state["sem_query"] = search_query.strip()
+
+# 結果表示・AI分析時に読み込み
+if st.session_state.get("sem_results") is not None:
+    results = st.session_state["sem_results"]
+    # テーブル表示 & AI分析ボタン
+```
+
+これにより、「検索」→「結果表示」→「AI分析ボタン押下」→「結果＋AI分析結果の両方を表示」が正しく動作します。
+
+### 3.4 利用モデルまとめ
+
+| 用途 | モデル | 呼び出し方 |
+|------|--------|------------|
+| Embedding（ベクトル化・検索） | `snowflake-arctic-embed-l-v2.0` | Cortex Search Service 内部で自動実行 |
+| LLM（分析テキスト生成） | `claude-3-5-sonnet` | `SNOWFLAKE.CORTEX.COMPLETE()` |
+
+---
+
+## 4. 取扱説明書
+
+### 4.1 Keyword Search（キーワード検索）
 
 #### 検索の実行
 
@@ -400,7 +535,7 @@ snowflake-log-search-app/
 
 ---
 
-### 3.2 Semantic Search（セマンティック検索）
+### 4.2 Semantic Search（セマンティック検索）
 
 #### セマンティック検索とは
 
@@ -417,7 +552,7 @@ snowflake-log-search-app/
 
 1. 検索バーに自然言語で状況を記述（例: `メモリ不足でサービスが停止した`）
 2. **「検索」ボタン**を押して検索を実行
-3. 結果はAIが意味的に関連度が高いと判断した順に表示されます
+3. 結果はAIが意味的に関連度が高いと判断した順にテーブル形式で表示されます
 
 #### AI分析（RAG）機能
 
@@ -440,9 +575,9 @@ snowflake-log-search-app/
 
 ---
 
-## 4. 注意点
+## 5. 注意点
 
-### 4.1 Streamlit in Snowflake (SiS) の制限
+### 5.1 Streamlit in Snowflake (SiS) の制限
 
 SiS の Streamlit バージョンは OSS 版より古く、以下の機能が**使用できません**:
 
@@ -455,7 +590,7 @@ SiS の Streamlit バージョンは OSS 版より古く、以下の機能が**�
 | Material Icons | テキストのみ |
 | `st.bar_chart(color=...)` | デフォルトカラーのみ |
 
-### 4.2 SiS のカラム名ダブルクォート問題
+### 5.2 SiS のカラム名ダブルクォート問題
 
 SiS 環境の `session.sql("SHOW ...").to_pandas()` は、カラム名が**ダブルクォートで囲まれた状態**で返されます。
 
@@ -472,15 +607,17 @@ elif 'size' in wh_info.columns:
 
 `SHOW WAREHOUSES`, `SHOW CORTEX SEARCH SERVICES`, `DESCRIBE SEARCH OPTIMIZATION` 等のメタデータクエリすべてに影響します。
 
-### 4.3 Cortex Search Service
+### 5.3 Cortex Search Service
 
 - **EMBEDDING_MODEL は作成後に変更不可** — モデルを変更するには `CREATE OR REPLACE` で再作成が必要
 - **PRIMARY KEY は VARCHAR 型のみ** — NUMBER 型カラムは `LOG_ID::VARCHAR AS LOG_ID` のようにキャストが必要
 - **TARGET_LAG** — 最大 `7 days`。値を大きくするとリフレッシュ頻度が下がりコスト削減
-- **ベクトル化時間** — 1,000万件で数十分〜数時間。Warehouse を一時的に拡大すると高速化
+- **ベクトル化時間** — 10万件であれば数分で完了
+- **大量データでの制限** — 1,000万件の LOGS テーブルを直接指定するとベクトル化が失敗する場合があります（"Dynamic Table refresh job cancelled." エラー）。その場合は行数を減らした別テーブル（LOGS_SMALL）を使用してください
 - **refresh_mode: INCREMENTAL** — PRIMARY KEY を設定すると増分更新（変更行のみ再ベクトル化）
+- **`st.dataframe` の `hide_index` パラメータ** — SiS の Streamlit バージョンでは未対応のため使用不可
 
-### 4.4 Snowpark の注意点
+### 5.4 Snowpark の注意点
 
 - `session.sql()` のバインド変数は**位置パラメータ（`?`）をリストで渡す**必要があります（名前付きバインド不可）
 
@@ -492,7 +629,7 @@ session.sql("SELECT * FROM T WHERE COL = ?", params=["value"])
 session.sql("SELECT * FROM T WHERE COL = :val", params={"val": "value"})
 ```
 
-### 4.5 コストに関する注意
+### 5.5 コストに関する注意
 
 | サービス | コスト要因 |
 |---|---|
@@ -514,7 +651,7 @@ DROP CORTEX SEARCH SERVICE LOG_SEARCH_APP.PUBLIC.LOG_SEMANTIC_SEARCH;
 ALTER WAREHOUSE SEARCH_WH SUSPEND;
 ```
 
-### 4.6 environment.yml
+### 5.6 environment.yml
 
 SiS の依存関係ファイルは Anaconda 形式です。パッケージ名は小文字で、`>=` バージョン指定構文は使えません。
 
@@ -526,7 +663,7 @@ dependencies:
   - snowflake
 ```
 
-### 4.7 マルチページの制御
+### 5.7 マルチページの制御
 
 - SiS では `pages/` ディレクトリ内のファイル名がサイドバーのページ名になります
 - メインファイル名もサイドバーに表示されるため、`Keyword_Search.py` のように命名します
@@ -542,5 +679,5 @@ dependencies:
 | キーワード検索 | `SEARCH()` 関数 + Search Optimization Service |
 | セマンティック検索 | Cortex Search Service (`snowflake-arctic-embed-l-v2.0`) |
 | AI分析 (RAG) | Cortex Complete (`claude-3-5-sonnet`) |
-| データ | Snowflake テーブル (1,000万件ログデータ) |
+| データ | Snowflake テーブル (LOGS: 1,000万件 / LOGS_SMALL: 10万件) |
 | 言語 | Python (Snowpark) |

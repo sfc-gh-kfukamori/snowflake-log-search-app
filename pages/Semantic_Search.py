@@ -115,7 +115,7 @@ with st.sidebar:
 
     # Source filter
     sources_df = session.sql(
-        "SELECT DISTINCT SOURCE FROM LOG_SEARCH_APP.PUBLIC.LOGS ORDER BY SOURCE"
+        "SELECT DISTINCT SOURCE FROM LOG_SEARCH_APP.PUBLIC.LOGS_SMALL ORDER BY SOURCE"
     ).to_pandas()
     all_sources = sources_df["SOURCE"].tolist()
 
@@ -219,78 +219,72 @@ if search_clicked and search_query and search_query.strip():
             search_kwargs["filter"] = filter_obj
 
         resp = svc.search(**search_kwargs)
-        results = resp.results
+        st.session_state["sem_results"] = resp.results
+        st.session_state["sem_query"] = search_query.strip()
 
-        # --- Display Results ---
-        st.subheader(f"検索結果: {len(results)} 件")
+    except Exception as e:
+        st.error(f"検索エラー: {e}")
+        st.session_state["sem_results"] = None
 
-        if len(results) == 0:
-            st.caption("該当するログが見つかりませんでした。別の表現で検索してみてください。")
-        else:
-            # Summary metrics
-            sev_counts = {}
-            for r in results:
-                s = r.get("SEVERITY", "UNKNOWN")
-                sev_counts[s] = sev_counts.get(s, 0) + 1
+# --- Display Results ---
+if st.session_state.get("sem_results") is not None:
+    results = st.session_state["sem_results"]
+    st.subheader(f"検索結果: {len(results)} 件")
 
-            cols = st.columns(min(len(sev_counts) + 1, 6))
-            cols[0].metric("Total", len(results))
-            for i, (sev, cnt) in enumerate(sorted(sev_counts.items())):
-                if i + 1 < len(cols):
-                    sev_class = sev.lower()
-                    cols[i + 1].markdown(
-                        f'<span class="sev-badge sev-{sev_class}">{sev}</span>',
-                        unsafe_allow_html=True,
-                    )
-                    cols[i + 1].metric(sev, cnt)
+    if len(results) == 0:
+        st.caption("該当するログが見つかりませんでした。別の表現で検索してみてください。")
+    else:
+        # Summary metrics
+        sev_counts = {}
+        for r in results:
+            s = r.get("SEVERITY", "UNKNOWN")
+            sev_counts[s] = sev_counts.get(s, 0) + 1
 
-            # Result cards
-            for i, r in enumerate(results):
-                data = dict(r)
-                sev = data.get("SEVERITY", "INFO")
+        cols = st.columns(min(len(sev_counts) + 1, 6))
+        cols[0].metric("Total", len(results))
+        for i, (sev, cnt) in enumerate(sorted(sev_counts.items())):
+            if i + 1 < len(cols):
                 sev_class = sev.lower()
-                ts = str(data.get("TIMESTAMP", ""))
-                source = data.get("SOURCE", "")
-                host = data.get("HOST", "")
-                message = data.get("MESSAGE", "")
-                log_id = data.get("LOG_ID", "")
-                badge = f'<span class="sev-badge sev-{sev_class}">{sev}</span>'
+                cols[i + 1].markdown(
+                    f'<span class="sev-badge sev-{sev_class}">{sev}</span>',
+                    unsafe_allow_html=True,
+                )
+                cols[i + 1].metric(sev, cnt)
 
-                with st.expander(
-                    f"[{sev}] {ts[:19]} | {source} | {str(message)[:80]}",
-                    expanded=(i < 3),
-                ):
-                    st.markdown(
-                        f'<div class="result-card {sev_class}">'
-                        f'{badge} <strong>{ts[:19]}</strong>'
-                        f'<pre style="white-space:pre-wrap;margin:0.5rem 0;">{message}</pre>'
-                        f'<div class="result-meta">'
-                        f'Host: <code>{host}</code> &nbsp; '
-                        f'Source: <code>{source}</code> &nbsp; '
-                        f'Log ID: <code>{log_id}</code>'
-                        f'</div></div>',
-                        unsafe_allow_html=True,
+        # Result table
+        rows = []
+        for r in results:
+            data = dict(r)
+            rows.append({
+                "LOG_ID": data.get("LOG_ID", ""),
+                "TIMESTAMP": str(data.get("TIMESTAMP", ""))[:19],
+                "SEVERITY": data.get("SEVERITY", ""),
+                "SOURCE": data.get("SOURCE", ""),
+                "HOST": data.get("HOST", ""),
+                "MESSAGE": data.get("MESSAGE", ""),
+            })
+        result_df = pd.DataFrame(rows)
+        st.dataframe(result_df, use_container_width=True)
+
+        # --- RAG: AI Analysis Button ---
+        st.markdown("---")
+        if st.button("AI分析（まとめ・考察を生成）"):
+            with st.spinner("Cortex Complete で分析中..."):
+                log_lines = []
+                for r in results:
+                    data = dict(r)
+                    sev = data.get("SEVERITY", "")
+                    ts = str(data.get("TIMESTAMP", ""))[:19]
+                    source = data.get("SOURCE", "")
+                    host = data.get("HOST", "")
+                    message = data.get("MESSAGE", "")
+                    log_lines.append(
+                        f"[{sev}] {ts} | {source} | {host} | {message}"
                     )
+                context = "\n".join(log_lines)
 
-            # --- RAG: AI Analysis Button ---
-            st.markdown("---")
-            if st.button("AI分析（まとめ・考察を生成）"):
-                with st.spinner("Cortex Complete で分析中..."):
-                    # Build context from search results
-                    log_lines = []
-                    for r in results:
-                        data = dict(r)
-                        sev = data.get("SEVERITY", "")
-                        ts = str(data.get("TIMESTAMP", ""))[:19]
-                        source = data.get("SOURCE", "")
-                        host = data.get("HOST", "")
-                        message = data.get("MESSAGE", "")
-                        log_lines.append(
-                            f"[{sev}] {ts} | {source} | {host} | {message}"
-                        )
-                    context = "\n".join(log_lines)
-
-                    prompt = f"""あなたはログ分析の専門家です。以下のログデータはセマンティック検索によって「{search_query}」というクエリに関連すると判定されたログです。
+                saved_query = st.session_state.get("sem_query", "")
+                prompt = f"""あなたはログ分析の専門家です。以下のログデータはセマンティック検索によって「{saved_query}」というクエリに関連すると判定されたログです。
 
 以下の観点で分析結果を日本語で出力してください：
 
@@ -304,26 +298,24 @@ if search_clicked and search_query and search_query.strip():
 {context}
 --- ログデータ終了 ---"""
 
-                    try:
-                        result_df = session.sql(
-                            "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', ?) AS RESPONSE",
-                            params=[prompt],
-                        ).to_pandas()
-                        ai_response = result_df["RESPONSE"].iloc[0]
+                try:
+                    result_df = session.sql(
+                        "SELECT SNOWFLAKE.CORTEX.COMPLETE('claude-3-5-sonnet', ?) AS RESPONSE",
+                        params=[prompt],
+                    ).to_pandas()
+                    ai_response = result_df["RESPONSE"].iloc[0]
 
-                        st.markdown(
-                            f'<div class="ai-analysis">'
-                            f'<h3>AI分析結果</h3>'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(ai_response)
+                    st.markdown(
+                        f'<div class="ai-analysis">'
+                        f'<h3>AI分析結果</h3>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(ai_response)
 
-                    except Exception as e:
-                        st.error(f"AI分析エラー: {e}")
+                except Exception as e:
+                    st.error(f"AI分析エラー: {e}")
 
-    except Exception as e:
-        st.error(f"検索エラー: {e}")
 else:
     # Help section when no query
     st.markdown("---")
