@@ -400,35 +400,21 @@ if search_clicked:
                 source_counts.columns = ["Source", "Count"]
                 st.bar_chart(source_counts.set_index("Source"))
 
+            # --- Row 2: By Severity + Events by Host ---
+            col_sev, col_host = st.columns(2)
+
+            with col_sev:
                 st.subheader("By Severity")
                 sev_counts = df["SEVERITY"].value_counts().reset_index()
                 sev_counts.columns = ["Severity", "Count"]
                 st.dataframe(sev_counts, use_container_width=True)
 
-            # --- Row 2: Line chart + Area chart ---
-            col_line, col_area = st.columns(2)
-
-            with col_line:
-                st.subheader("Event Trend")
-                trend_df = (
-                    df.groupby("hour_bucket")
-                    .size()
-                    .reset_index(name="Events")
-                )
-                trend_df = trend_df.rename(columns={"hour_bucket": "Time"})
-                trend_df = trend_df.set_index("Time").sort_index()
-                st.line_chart(trend_df)
-
-            with col_area:
-                st.subheader("Severity Distribution")
-                st.area_chart(timeline_pivot)
-
-            # --- Row 3: Host chart ---
-            st.subheader("Events by Host")
-            host_counts = df["HOST"].value_counts().reset_index()
-            host_counts.columns = ["Host", "Count"]
-            host_chart = host_counts.head(15).set_index("Host")
-            st.bar_chart(host_chart)
+            with col_host:
+                st.subheader("Events by Host")
+                host_counts = df["HOST"].value_counts().reset_index()
+                host_counts.columns = ["Host", "Count"]
+                host_chart = host_counts.head(15).set_index("Host")
+                st.bar_chart(host_chart)
         else:
             st.caption("No log events found. Try adjusting your search query or filters.")
 
@@ -486,9 +472,8 @@ st.markdown("""
 | **重要度フィルタ** | FATAL / ERROR / WARN / INFO / DEBUG レベルでの絞り込み |
 | **ソースフィルタ** | アプリケーション・サービス名での絞り込み |
 | **タイムライン棒グラフ** | 時間帯×重要度別のイベント件数ヒストグラム |
-| **イベント推移（折れ線）** | 時間帯ごとの全イベント数の推移トレンド |
-| **重要度分布（面グラフ）** | 重要度別の積み上げ面グラフでボリューム感を表現 |
 | **Top Sources** | ソース別ヒット数のランキングチャート |
+| **By Severity** | 重要度別の件数テーブル |
 | **Events by Host** | ホスト別イベント数の棒グラフ（上位15件） |
 | **ログ詳細ビュー** | 各ログの全文メッセージとメタデータを展開表示 |
 | **Search Optimization管理** | サイドバーからインデックスの有効化・無効化・状態確認が可能 |
@@ -521,8 +506,8 @@ st.markdown("""
 
 タブを切り替えてデータを探索します：
 
-- **Charts** - 時間帯ごとのイベント量と重要度分布の棒グラフ・折れ線・面グラフ。
-  ソース別ランキング、ホスト別イベント数、重要度内訳テーブルも表示。
+- **Charts** - 時間帯ごとのイベント量の棒グラフ、ソース別ランキング、
+  重要度別件数テーブル、ホスト別イベント数チャートを表示。
 - **Events** - 時刻・重要度・ソース・ホスト・メッセージのデータテーブル。
   列ヘッダーをクリックしてソート可能。
 - **Details** - 個別ログの展開リスト。クリックするとメッセージ全文と
