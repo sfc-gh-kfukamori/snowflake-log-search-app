@@ -114,7 +114,7 @@ with st.sidebar:
     st.subheader("Time Range")
     time_preset = st.selectbox(
         "Quick select",
-        ["Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days", "Custom"],
+        ["Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days", "Last 3 months", "Last 1 year", "Last 3 years", "Custom"],
         index=4,
     )
 
@@ -133,6 +133,15 @@ with st.sidebar:
         end_time = now
     elif time_preset == "Last 30 days":
         start_time = now - timedelta(days=30)
+        end_time = now
+    elif time_preset == "Last 3 months":
+        start_time = now - timedelta(days=90)
+        end_time = now
+    elif time_preset == "Last 1 year":
+        start_time = now - timedelta(days=365)
+        end_time = now
+    elif time_preset == "Last 3 years":
+        start_time = now - timedelta(days=1095)
         end_time = now
     else:
         col_s, col_e = st.columns(2)
