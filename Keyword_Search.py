@@ -419,40 +419,47 @@ if search_clicked:
             # --- Row 3: Extracted Fields ---
             st.markdown("---")
             st.subheader("Extracted Fields")
-            st.caption("MESSAGEカラムから自動抽出されたフィールドの値分布")
+            st.caption("MESSAGEカラムから自動抽出されたフィールドの値分布（出現頻度順・上位15フィールド）")
 
-            # Define extraction patterns
-            extract_patterns = {
-                "HTTP Status": r'HTTP\s(\d{3})',
-                "IP Address": r'IP\s([\d.]+)',
-                "Duration (ms)": r'(\d+)ms',
-                "Percentage": r'(\d+)%',
-                "Endpoint": r'endpoint:\s(/\S+)',
-                "User": r'user=(\S+)',
-                "Session ID": r'session_id=(\S+)',
-                "Domain": r'domain\s(\S+)',
-                "Volume": r'volume\s(/\S+)',
-                "Topic": r'topic\s(\S+)',
-            }
-
-            # Extract fields and collect non-empty results
+            # --- Generic key=value parser ---
+            all_kvs = df["MESSAGE"].str.extractall(r'([a-z_]+)=(\S+)')
             extracted = {}
-            for field_name, pattern in extract_patterns.items():
-                vals = df["MESSAGE"].str.extract(pattern, expand=False).dropna()
-                if len(vals) > 0:
-                    top_vals = vals.value_counts().head(10).reset_index()
+            if len(all_kvs) > 0:
+                all_kvs.columns = ["key", "value"]
+                for key, grp in all_kvs.groupby("key"):
+                    top_vals = grp["value"].value_counts().head(10).reset_index()
                     top_vals.columns = ["Value", "Count"]
-                    extracted[field_name] = top_vals
+                    extracted[key] = top_vals
+
+            # --- Supplemental patterns for non key=value fields ---
+            special_patterns = {
+                "http_status": r'HTTP\s(\d{3})',
+                "timeout_ms": r'after\s(\d+)ms',
+                "retry_attempt": r'attempt\s(\d+)',
+            }
+            for field_name, pattern in special_patterns.items():
+                if field_name not in extracted:
+                    vals = df["MESSAGE"].str.extract(pattern, expand=False).dropna()
+                    if len(vals) > 0:
+                        top_vals = vals.value_counts().head(10).reset_index()
+                        top_vals.columns = ["Value", "Count"]
+                        extracted[field_name] = top_vals
 
             if extracted:
+                # Sort fields by total occurrence count (descending), limit to top 15
+                sorted_fields = sorted(
+                    extracted.keys(),
+                    key=lambda k: extracted[k]["Count"].sum(),
+                    reverse=True,
+                )[:15]
+
                 # Display in 3-column layout
-                field_names = list(extracted.keys())
-                for i in range(0, len(field_names), 3):
+                for i in range(0, len(sorted_fields), 3):
                     cols_ef = st.columns(3)
                     for j in range(3):
                         idx = i + j
-                        if idx < len(field_names):
-                            fname = field_names[idx]
+                        if idx < len(sorted_fields):
+                            fname = sorted_fields[idx]
                             with cols_ef[j]:
                                 st.markdown(f"**{fname}**")
                                 st.dataframe(extracted[fname], use_container_width=True)
