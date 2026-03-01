@@ -285,9 +285,11 @@ flowchart TD
     H --> I["session.sql() でクエリ実行"]
     I --> J[結果を pandas DataFrame に変換]
     J --> K[サマリーメトリクス表示<br/>FATAL/ERROR/WARN/INFO/DEBUG]
-    J --> L[Charts タブ<br/>棒グラフ・折れ線・面グラフ]
+    J --> L[Charts タブ<br/>棒グラフ・By Severity・Events by Host]
+    J --> EF[Extracted Fields<br/>key=value 汎用パーサー]
     J --> M[Events タブ<br/>データテーブル]
     J --> N[Details タブ<br/>個別ログ展開ビュー]
+    L --> EF
 ```
 
 ### 2.3 Semantic Search + RAG フロー
@@ -344,6 +346,7 @@ snowflake-log-search-app/
 │   ├── Warehouse Management   # サイズ表示・変更
 │   ├── Search Execution       # SEARCH()関数でクエリ実行
 │   ├── Charts/Events/Details  # 結果表示タブ
+│   ├── Extracted Fields       # 汎用key=valueパーサーによるフィールド抽出
 │   └── Help                   # 使い方・技術情報
 │
 ├── pages/
@@ -512,9 +515,24 @@ if st.session_state.get("sem_results") is not None:
 #### 結果表示
 
 - **サマリーメトリクス** — 重要度別の件数をバッジ付きで表示
-- **Charts タブ** — タイムライン棒グラフ、イベント推移折れ線、重要度分布面グラフ、Top Sources、Events by Host
+- **Charts タブ** — タイムライン棒グラフ、By Severity、Events by Host、Extracted Fields
 - **Events タブ** — 全結果のデータテーブル（ソート可能）
 - **Details タブ** — 個別ログの展開ビュー（メッセージ全文・メタデータ）
+
+#### Extracted Fields（フィールド自動抽出）
+
+Charts タブの下部に、検索結果の MESSAGE カラムから自動抽出されたフィールドの値分布が表示されます。
+
+**抽出方式:**
+
+- **汎用 key=value パーサー** — `key=value` 形式（例: `service=payment-service`, `exit_code=76`）を Pandas `str.extractall()` で一括抽出
+- **補助パターン** — `key=value` 形式に該当しないフィールド（HTTP ステータスコード、タイムアウト時間、リトライ回数）は個別の正規表現で抽出
+
+**表示:**
+
+- 出現頻度が高い順に**上位15フィールド**を表示
+- 各フィールドの **Top 10 値**とその出現回数を3カラムレイアウトで表示
+- 新しいログパターンが追加されても `key=value` 形式であればコード変更不要で自動対応
 
 #### 元データを確認
 
