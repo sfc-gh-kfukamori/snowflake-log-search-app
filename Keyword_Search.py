@@ -415,6 +415,49 @@ if search_clicked:
                 host_counts.columns = ["Host", "Count"]
                 host_chart = host_counts.head(15).set_index("Host")
                 st.bar_chart(host_chart)
+
+            # --- Row 3: Extracted Fields ---
+            st.markdown("---")
+            st.subheader("Extracted Fields")
+            st.caption("MESSAGEカラムから自動抽出されたフィールドの値分布")
+
+            # Define extraction patterns
+            extract_patterns = {
+                "HTTP Status": r'HTTP\s(\d{3})',
+                "IP Address": r'IP\s([\d.]+)',
+                "Duration (ms)": r'(\d+)ms',
+                "Percentage": r'(\d+)%',
+                "Endpoint": r'endpoint:\s(/\S+)',
+                "User": r'user=(\S+)',
+                "Session ID": r'session_id=(\S+)',
+                "Domain": r'domain\s(\S+)',
+                "Volume": r'volume\s(/\S+)',
+                "Topic": r'topic\s(\S+)',
+            }
+
+            # Extract fields and collect non-empty results
+            extracted = {}
+            for field_name, pattern in extract_patterns.items():
+                vals = df["MESSAGE"].str.extract(pattern, expand=False).dropna()
+                if len(vals) > 0:
+                    top_vals = vals.value_counts().head(10).reset_index()
+                    top_vals.columns = ["Value", "Count"]
+                    extracted[field_name] = top_vals
+
+            if extracted:
+                # Display in 3-column layout
+                field_names = list(extracted.keys())
+                for i in range(0, len(field_names), 3):
+                    cols_ef = st.columns(3)
+                    for j in range(3):
+                        idx = i + j
+                        if idx < len(field_names):
+                            fname = field_names[idx]
+                            with cols_ef[j]:
+                                st.markdown(f"**{fname}**")
+                                st.dataframe(extracted[fname], use_container_width=True)
+            else:
+                st.caption("抽出可能なフィールドが見つかりませんでした。")
         else:
             st.caption("No log events found. Try adjusting your search query or filters.")
 
