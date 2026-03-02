@@ -236,6 +236,13 @@ CREATE STREAMLIT IF NOT EXISTS LOG_SEARCH_APP.PUBLIC.LOG_SEARCH
 
 > サイドバーに「Keyword Search」「Semantic Search」の2ページが表示されます。
 
+(AWS Tokyo Regionなどをご利用の場合)：  
+AI分析で利用するモデルを使用可能にするため、クロスリージョンコールを有効にする。  
+
+```sql
+ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
+```sql
+
 ---
 
 ## 2. アーキテクチャ・コードロジック
