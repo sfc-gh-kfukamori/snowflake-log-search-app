@@ -174,7 +174,7 @@ ALTER TABLE LOG_SEARCH_APP.PUBLIC.LOGS_SMALL SET CHANGE_TRACKING = TRUE;
 ### 1.8 Cortex Search Service 作成
 
 セマンティック検索用の Cortex Search Service を `LOGS_SMALL` テーブルから作成します。  
-(Cortex Searchを作成しないでも、Keyword Searchは動作するため、セマンティック検索が必要なければ、以降は実施しないでもOK）。
+(Cortex Searchを作成しないでも、Keyword Searchは動作するため、セマンティック検索が必要なければ、実施しないでもOK）。
 
 ```sql
 CREATE OR REPLACE CORTEX SEARCH SERVICE LOG_SEARCH_APP.PUBLIC.LOG_SEMANTIC_SEARCH
