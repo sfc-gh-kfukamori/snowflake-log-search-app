@@ -204,7 +204,8 @@ CREATE STAGE IF NOT EXISTS LOG_SEARCH_APP.PUBLIC.STREAMLIT_STAGE
     DIRECTORY = (ENABLE = TRUE);
 ```
 
-ローカルからファイルをアップロード:
+ローカルからファイルをアップロード:  
+(SnowsightからGUIアップロードも可）
 
 ```sql
 -- メインファイル
