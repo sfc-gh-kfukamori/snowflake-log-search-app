@@ -241,7 +241,7 @@ AI分析で利用するモデルを使用可能にするため、クロスリー
 
 ```sql
 ALTER ACCOUNT SET CORTEX_ENABLED_CROSS_REGION = 'ANY_REGION';
-```sql
+```
 
 ---
 
